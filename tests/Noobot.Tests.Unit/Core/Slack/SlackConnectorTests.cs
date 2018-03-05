@@ -18,7 +18,7 @@ namespace Noobot.Tests.Unit.Core.Slack
             var connector = new NoobotCore(configReader, new EmptyLogger(), containerStub);
 
             // when
-            await connector.Connect();
+            await connector.ConnectAsync();
 
             // then
         }

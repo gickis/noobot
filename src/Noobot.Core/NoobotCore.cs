@@ -1,43 +1,51 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using Common.Logging;
+using App.Metrics;
+using App.Metrics.Timer;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Noobot.Core.Configuration;
-using Noobot.Core.DependencyResolution;
 using Noobot.Core.Extensions;
-using Noobot.Core.Logging;
 using Noobot.Core.MessagingPipeline.Middleware;
 using Noobot.Core.MessagingPipeline.Request;
 using Noobot.Core.MessagingPipeline.Request.Extensions;
 using Noobot.Core.MessagingPipeline.Response;
-using Noobot.Core.Plugins;
-using Noobot.Core.Plugins.StandardPlugins;
 using SlackConnector;
 using SlackConnector.Models;
 
 namespace Noobot.Core
 {
-    internal class NoobotCore : INoobotCore
+    internal class NoobotCore : INoobotCore, IHostedService
     {
-        private readonly IConfigReader _configReader;
-        private readonly ILog _log;
-        private readonly INoobotContainer _container;
-        private readonly AverageStat _averageResponse;
+        private static readonly TimerOptions ResponseOptions = new TimerOptions
+        {
+            Name = "Response",
+            DurationUnit = TimeUnit.Milliseconds,
+            MeasurementUnit = Unit.Requests,
+            RateUnit = TimeUnit.Seconds
+        };
+
+        private readonly NoobotOptions _options;
+        private readonly ILogger<NoobotCore> _logger;
+        private readonly IMetrics _metrics;
+
         private ISlackConnection _connection;
 
-        public NoobotCore(IConfigReader configReader, ILog log, INoobotContainer container)
+        public NoobotCore(NoobotOptions options, ILogger<NoobotCore> logger, IMetrics metrics)
         {
-            _configReader = configReader;
-            _log = log;
-            _container = container;
-            _averageResponse = new AverageStat("milliseconds");
+            _options = options ?? throw new ArgumentNullException(nameof(options));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         }
 
-        public async Task Connect()
+        public bool? IsConnected => _connection?.IsConnected;
+
+        public async Task ConnectAsync()
         {
-            string slackKey = _configReader.SlackApiKey;
+            string slackKey = _options.ApiKey;
 
             var connector = new SlackConnector.SlackConnector();
             _connection = await connector.Connect(slackKey);
@@ -46,62 +54,50 @@ namespace Noobot.Core
             _connection.OnReconnecting += OnReconnecting;
             _connection.OnReconnect += OnReconnect;
 
-            _log.Info("Connected!");
-            _log.Info($"Bots Name: {_connection.Self.Name}");
-            _log.Info($"Team Name: {_connection.Team.Name}");
-
-            _container.GetPlugin<StatsPlugin>()?.RecordStat("Connected:Since", DateTime.Now.ToString("G"));
-            _container.GetPlugin<StatsPlugin>()?.RecordStat("Response:Average", _averageResponse);
-
-            StartPlugins();
+            _logger.LogInformation("Connected!");
+            _logger.LogInformation($"Bots Name: {_connection.Self.Name}");
+            _logger.LogInformation($"Team Name: {_connection.Team.Name}");
         }
 
         private Task OnReconnect()
         {
-            _log.Info("Connection Restored!");
-            _container.GetPlugin<StatsPlugin>().IncrementState("ConnectionsRestored");
+            _logger.LogInformation("Connection Restored!");
             return Task.CompletedTask;
         }
 
         private Task OnReconnecting()
         {
-            _log.Info("Attempting to reconnect to Slack...");
-            _container.GetPlugin<StatsPlugin>().IncrementState("Reconnecting");
+            _logger.LogInformation("Attempting to reconnect to Slack...");
             return Task.CompletedTask;
         }
 
         private bool _isDisconnecting;
-        public void Disconnect()
+        public async Task DisconnectAsync()
         {
             _isDisconnecting = true;
 
             if (_connection != null && _connection.IsConnected)
             {
-                _connection
-                    .Close()
-                    .GetAwaiter()
-                    .GetResult();
+                await _connection.Close();
             }
         }
 
         private void OnDisconnect()
         {
-            StopPlugins();
-
             if (_isDisconnecting)
             {
-                _log.Info("Disconnected.");
+                _logger.LogInformation("Disconnected.");
             }
             else
             {
-                _log.Info("Disconnected from server, attempting to reconnect...");
+                _logger.LogInformation("Disconnected from server, attempting to reconnect...");
                 Reconnect();
             }
         }
 
         internal void Reconnect()
         {
-            _log.Info("Reconnecting...");
+            _logger.LogInformation("Reconnecting...");
             if (_connection != null)
             {
                 _connection.OnMessageReceived -= MessageReceived;
@@ -110,60 +106,57 @@ namespace Noobot.Core
             }
 
             _isDisconnecting = false;
-            Connect()
+
+            ConnectAsync()
                 .ContinueWith(task =>
                 {
                     if (task.IsCompleted && !task.IsCanceled && !task.IsFaulted)
                     {
-                        _log.Info("Connection restored.");
-                        _container.GetPlugin<StatsPlugin>().IncrementState("ConnectionsRestored");
+                        _logger.LogInformation("Connection restored.");
                     }
                     else
                     {
-                        _log.Info($"Error while reconnecting: {task.Exception}");
+                        _logger.LogInformation($"Error while reconnecting: {task.Exception}");
                     }
                 });
         }
 
         public async Task MessageReceived(SlackMessage message)
         {
-            Stopwatch stopwatch = Stopwatch.StartNew();
-            _log.Info($"[Message found from '{message.User.Name}']");
-
-            IMiddleware pipeline = _container.GetMiddlewarePipeline();
-            var incomingMessage = new IncomingMessage
+            using (_metrics.Measure.Timer.Time(ResponseOptions))
             {
-                RawText = message.Text,
-                FullText = message.Text,
-                UserId = message.User.Id,
-                Username = GetUsername(message),
-                UserEmail = message.User.Email,
-                Channel = message.ChatHub.Id,
-                ChannelType = message.ChatHub.Type == SlackChatHubType.DM ? ResponseType.DirectMessage : ResponseType.Channel,
-                UserChannel = await GetUserChannel(message),
-                BotName = _connection.Self.Name,
-                BotId = _connection.Self.Id,
-                BotIsMentioned = message.MentionsBot
-            };
+                _logger.LogInformation($"[Message found from '{message.User.Name}']");
 
-            incomingMessage.TargetedText = incomingMessage.GetTargetedText();
-
-            try
-            {
-                foreach (ResponseMessage responseMessage in pipeline.Invoke(incomingMessage))
+                IMiddleware pipeline = null;//_container.GetMiddlewarePipeline();
+                var incomingMessage = new IncomingMessage
                 {
-                    await SendMessage(responseMessage);
+                    RawText = message.Text,
+                    FullText = message.Text,
+                    UserId = message.User.Id,
+                    Username = GetUsername(message),
+                    UserEmail = message.User.Email,
+                    Channel = message.ChatHub.Id,
+                    ChannelType = message.ChatHub.Type == SlackChatHubType.DM ? ResponseType.DirectMessage : ResponseType.Channel,
+                    UserChannel = await GetUserChannel(message),
+                    BotName = _connection.Self.Name,
+                    BotId = _connection.Self.Id,
+                    BotIsMentioned = message.MentionsBot
+                };
+
+                incomingMessage.TargetedText = incomingMessage.GetTargetedText();
+
+                try
+                {
+                    foreach (ResponseMessage responseMessage in pipeline.Invoke(incomingMessage))
+                    {
+                        await SendMessage(responseMessage);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"ERROR WHILE PROCESSING MESSAGE: {ex}");
                 }
             }
-            catch (Exception ex)
-            {
-                _log.Error($"ERROR WHILE PROCESSING MESSAGE: {ex}");
-            }
-
-            stopwatch.Stop();
-
-            _log.Info($"[Message ended - Took {stopwatch.ElapsedMilliseconds} milliseconds]");
-            _averageResponse.Log(stopwatch.ElapsedMilliseconds);
         }
 
         public async Task Ping()
@@ -179,7 +172,7 @@ namespace Noobot.Core
             {
                 if (responseMessage is TypingIndicatorMessage)
                 {
-                    _log.Info($"Indicating typing on channel '{chatHub.Name}'");
+                    _logger.LogInformation($"Indicating typing on channel '{chatHub.Name}'");
                     await _connection.IndicateTyping(chatHub);
                 }
                 else
@@ -192,13 +185,13 @@ namespace Noobot.Core
                     };
 
                     string textTrimmed = botMessage.Text.Length > 50 ? botMessage.Text.Substring(0, 50) + "..." : botMessage.Text;
-                    _log.Info($"Sending message '{textTrimmed}'");
+                    _logger.LogInformation($"Sending message '{textTrimmed}'");
                     await _connection.Say(botMessage);
                 }
             }
             else
             {
-                _log.Error($"Unable to find channel for message '{responseMessage.Text}'. Message not sent");
+                _logger.LogError($"Unable to find channel for message '{responseMessage.Text}'. Message not sent");
             }
         }
 
@@ -326,28 +319,14 @@ namespace Noobot.Core
             return chatHub;
         }
 
-        /// <summary>
-        /// TODO: Move these methods into container?
-        /// </summary>
-        private void StartPlugins()
+        public Task StartAsync(CancellationToken cancellationToken)
         {
-            IPlugin[] plugins = _container.GetPlugins();
-            foreach (IPlugin plugin in plugins)
-            {
-                plugin.Start();
-            }
+            return ConnectAsync();
         }
 
-        /// <summary>
-        /// TODO: Move these methods into container?
-        /// </summary>
-        private void StopPlugins()
+        public Task StopAsync(CancellationToken cancellationToken)
         {
-            IPlugin[] plugins = _container.GetPlugins();
-            foreach (IPlugin plugin in plugins)
-            {
-                plugin.Stop();
-            }
+            return DisconnectAsync();
         }
     }
 }

@@ -5,6 +5,7 @@
     <Version>1.0.1</Version>
     <AssemblyVersion>1.0.0.1</AssemblyVersion>
     <FileVersion>1.0.0.1</FileVersion>
+    <LangVersion>latest</LangVersion>
     <Description>Noobot Core allows you to host your own SlackBot wrapped up in Noobot joy. Please see project website for examples.</Description>
     <PackageProjectUrl>http://github.com/noobot/noobot/</PackageProjectUrl>
     <PackageTags>noobot Slack API SlackApi SlackConnector bot slackbot</PackageTags>
@@ -13,8 +14,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="SlackConnector" Version="4.1.48" />
+    <PackageReference Include="App.Metrics.Abstractions" Version="2.0.0-preview1" />
+    <PackageReference Include="App.Metrics.Health.Abstractions" Version="2.0.0-preview1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="2.1.0-preview1-final" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="2.1.0-preview1-final" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="2.1.0-preview1-final" />
+    <PackageReference Include="SlackConnector" Version="4.1.52" />
     <PackageReference Include="Common.Logging" Version="3.4.1" />
-    <PackageReference Include="StructureMap" Version="4.5.2" />
+    <PackageReference Include="StructureMap" Version="4.6.1" />
   </ItemGroup>
 </Project>

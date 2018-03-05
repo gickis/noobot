@@ -7,8 +7,10 @@ namespace Noobot.Core
 {
     public interface INoobotCore
     {
-        Task Connect();
-        void Disconnect();
+        bool? IsConnected { get; }
+
+        Task ConnectAsync();
+        Task DisconnectAsync();
         Task MessageReceived(SlackMessage message);
         Task SendMessage(ResponseMessage responseMessage);
         string GetUserIdForUsername(string username);
